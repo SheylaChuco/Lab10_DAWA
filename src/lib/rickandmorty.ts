@@ -32,8 +32,47 @@ export async function getCharacters(page = 1): Promise<CharacterResponse> {
   return res.json();
 }
 
-// Detalle: se vuelve a pedir a la API cada 10 días (ISR)
+// Trae TODOS los personajes (42 peticiones en total) y los guarda en memoria.
+// Así el build no hace una petición por cada personaje (826) y la API no
+// responde con el error 429 (demasiadas peticiones).
+// Los datos se revalidan cada 10 días (ISR).
+let todosCache: Promise<Character[]> | null = null;
+
+export function getAllCharacters(): Promise<Character[]> {
+  if (!todosCache) {
+    todosCache = (async () => {
+      const primera = await fetchConReintentos(`${API}?page=1`, {
+        next: { revalidate: REVALIDATE_10_DIAS },
+      });
+      if (!primera.ok) throw new Error("Error al cargar los personajes");
+      const first: CharacterResponse = await primera.json();
+      const todos = [...first.results];
+
+      // Una página a la vez, para no saturar la API
+      for (let p = 2; p <= first.info.pages; p++) {
+        const res = await fetchConReintentos(`${API}?page=${p}`, {
+          next: { revalidate: REVALIDATE_10_DIAS },
+        });
+        if (!res.ok) throw new Error("Error al cargar los personajes");
+        const data: CharacterResponse = await res.json();
+        todos.push(...data.results);
+      }
+      return todos;
+    })().catch((e) => {
+      todosCache = null;
+      throw e;
+    });
+  }
+  return todosCache;
+}
+
+// Detalle: se busca por id en la lista guardada (ISR, 10 días).
+// Si no está (ej. un personaje nuevo), se pide directo a la API por id.
 export async function getCharacter(id: string): Promise<Character | null> {
+  const todos = await getAllCharacters();
+  const encontrado = todos.find((c) => String(c.id) === id);
+  if (encontrado) return encontrado;
+
   const res = await fetchConReintentos(`${API}/${id}`, {
     next: { revalidate: REVALIDATE_10_DIAS },
   });
@@ -42,16 +81,10 @@ export async function getCharacter(id: string): Promise<Character | null> {
   return res.json();
 }
 
-// Recorre todas las páginas de la API para obtener el id de cada personaje
+// Ids de todos los personajes para generateStaticParams
 export async function getAllCharacterIds(): Promise<string[]> {
-  const first = await getCharacters(1);
-  const ids = first.results.map((c) => String(c.id));
-
-  const pages = Array.from({ length: first.info.pages - 1 }, (_, i) => i + 2);
-  const rest = await Promise.all(pages.map((p) => getCharacters(p)));
-  rest.forEach((r) => r.results.forEach((c) => ids.push(String(c.id))));
-
-  return ids;
+  const todos = await getAllCharacters();
+  return todos.map((c) => String(c.id));
 }
 
 // ---------- Datos para la portada ----------
